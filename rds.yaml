@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation  Template to create vpc,security group igw and attachments,route tables,routes,
+  and rds postgres aurora with 2 public subnets on eu-west1 zone
+  and sending Aurora DB cluster logs to
+  CloudWatch Logs: this template showing how to create an Aurora PostgreSQL DB
+  cluster that exports logs to CloudWatch Logs. **WARNING** This template
+  enables log exports to CloudWatch Logs. You will be billed for the AWS
+  resources including RDS and snapshots used if you create a stack from this template.
+Parameters:
+  DBUsername:
+    NoEcho: 'true'
+    Description: Username for PostgreSQL database access
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    NoEcho: 'true'
+    Description: Password for PostgreSQL database access
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+  PrimaryAZ:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Primary AZ
+Conditions:
+  IsFirstPrimaryAZ:
+    Fn::Equals:
+    - !Ref PrimaryAZ
+    - Fn::Select:
+        - 0
+        - [eu-west-1a,eu-west1b] 
+Resources:
+  myVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+      - Key: stack
+        Value: rdsdb
+  myInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: stack
+        Value: rdsdb
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: myVPC
+      InternetGatewayId:
+        Ref: myInternetGateway          
+  Subnet1:
+    Type: "AWS::EC2::Subnet"
+    DependsOn: myVPC
+    Properties:
+      AvailabilityZone: !Ref PrimaryAZ
+      VpcId: !Ref myVPC
+      CidrBlock: !Select [ 0, !Cidr [ !GetAtt myVPC.CidrBlock, 1, 8 ]]
+      MapPublicIpOnLaunch: true
+      # ...
+  Subnet2:
+    Type: "AWS::EC2::Subnet"
+    DependsOn: Subnet1
+    Properties:
+      VpcId: !Ref myVPC
+      CidrBlock: !Select [ 1, !Cidr [ !GetAtt myVPC.CidrBlock, 2, 8 ]]
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        Fn::If:
+        - IsFirstPrimaryAZ
+        - Fn::Select:
+            - 1
+            - Fn::GetAZs: ""
+        - Fn::Select:
+            - 0
+            - Fn::GetAZs: ""
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref myVPC
+      Tags:
+        - Key: Name
+          Value:  rdsstack Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref myInternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref Subnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref Subnet2
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow client to connect to postgres
+      VpcId: !Ref myVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0  
+          
+  myDBSubnetGroup: 
+    Properties: 
+      DBSubnetGroupDescription: description
+      SubnetIds: 
+        - !Ref Subnet1
+        - !Ref Subnet2
+      Tags: 
+        - 
+          Key: name
+          Value: mydbsubnetgroup
+    Type: "AWS::RDS::DBSubnetGroup"      
+  RDSCluster:
+    Type: 'AWS::RDS::DBCluster'
+    Properties:
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBClusterIdentifier: aurora-postgresql-cluster
+      Engine: aurora-postgresql
+      EngineVersion: '11.9'
+      DBClusterParameterGroupName: default.aurora-postgresql11
+      DBSubnetGroupName: !Ref myDBSubnetGroup
+      Port: 5432
+      VpcSecurityGroupIds: 
+        - !GetAtt "InstanceSecurityGroup.GroupId" 
+      EnableCloudwatchLogsExports:
+        - postgresql
+  RDSDBInstance1:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBInstanceIdentifier: aurora-postgresql-instance1
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref RDSCluster
+      PubliclyAccessible: 'true'
+      DBInstanceClass: db.t3.medium
+  RDSDBInstance2:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBInstanceIdentifier: aurora-postgresql-instance2
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref RDSCluster
+      PubliclyAccessible: 'true'
+      DBInstanceClass: db.t3.medium
